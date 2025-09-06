@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Live Football Scores</title>
+  <style>
+    /* === Dark Theme Base === */
+    body {font-family:"Segoe UI",sans-serif;margin:0;padding:0;background:#121212;color:#e0e0e0;}
+    nav {display:flex;justify-content:space-between;align-items:center;padding:14px 20px;background:#1e1e1e;color:#fff;font-size:18px;font-weight:bold;box-shadow:0 2px 6px rgba(0,0,0,0.4);}
+    .nav-left,.nav-center,.nav-right{display:flex;align-items:center;gap:8px;}
+    .nav-center{gap:4px;}
+    nav button{background:#2a2a2a;color:#fff;border:none;padding:8px 14px;border-radius:8px;cursor:pointer;transition:background 0.2s;}
+    nav button:hover{background:#3a3a3a;}
+    .view{padding:20px;}
+    .columns-container{display:flex;justify-content:space-between;flex-wrap:wrap;gap:20px;}
+    .column{flex:1 1 30%;background:#1a1a1a;padding:16px;border-radius:16px;box-shadow:0 2px 8px rgba(0,0,0,0.5);min-width:280px;}
+    .column h2{margin:0 0 12px;font-size:18px;color:#fff;border-bottom:1px solid #333;padding-bottom:6px;}
+    .match-card{background:#222;border-radius:12px;padding:12px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;transition:transform 0.2s,background 0.2s;box-shadow:0 1px 4px rgba(0,0,0,0.4);}
+    .match-card:hover{background:#2b2b2b;transform:translateY(-2px);}
+    .team{flex:1;font-weight:500;text-align:center;}
+    .score{font-size:16px;font-weight:bold;color:#00ff95;margin:0 8px;min-width:40px;text-align:center;}
+    .minute{font-size:12px;color:#bbb;margin-left:8px;}
+    #settingsActions{display:flex;gap:10px;margin-bottom:15px;}
+    #settingsActions button{padding:10px 16px;background:#2e7d32;border:none;color:white;border-radius:8px;cursor:pointer;font-weight:bold;transition:background 0.2s;}
+    #settingsActions button:hover{background:#388e3c;}
+    #resetLeaguesBtn{background:#c62828;}
+    #resetLeaguesBtn:hover{background:#d32f2f;}
+    #leagueList{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:16px;}
+    .region-card{background:#1a1a1a;border-radius:12px;padding:12px;box-shadow:0 1px 6px rgba(0,0,0,0.4);}
+    .region-card h3{margin:0 0 10px;font-size:16px;color:#00ff95;border-bottom:1px solid #333;padding-bottom:6px;display:flex;justify-content:space-between;align-items:center;}
+    .league-item{background:#222;padding:8px 12px;margin:6px 0;border-radius:8px;display:flex;align-items:center;}
+    .league-item label{margin-left:8px;}
+  </style>
+</head>
+<body>
+<nav>
+  <div class="nav-left"><div>⚽ Live Football Scores</div></div>
+  <div class="nav-center">
+    <button id="prevDay">&lt;</button>
+    <div id="currentDate"></div>
+    <button id="todayBtn">Today</button>
+    <button id="nextDay">&gt;</button>
+  </div>
+  <div class="nav-right"><button id="settingsBtn">⚙ Settings</button></div>
+</nav>
+<div id="homeView" class="view">
+  <div class="columns-container">
+    <div class="column" id="notstarted"><h2>Not Started</h2><div class="matches"></div></div>
+    <div class="column" id="inprogress"><h2>In Progress</h2><div class="matches"></div></div>
+    <div class="column" id="finished"><h2>Finished</h2><div class="matches"></div></div>
+  </div>
+</div>
+<div id="settingsView" class="view" style="display:none;">
+  <div id="settingsActions">
+    <button id="saveLeaguesBtn">Save</button>
+    <button id="resetLeaguesBtn">Reset</button>
+  </div>
+  <h2>Select Leagues</h2>
+  <div id="leagueList"></div>
+</div>
+
+<script>
+const COUNTRIES=['fr','es','de','gb','it','tn','br','tr'];
+let allLeagues=[];let selectedLeagueIds=JSON.parse(localStorage.getItem('selectedLeagues')||'[]');
+let previousMatches={};let settingsVisible=false;const notifiedGoals=new Set();
+let selectedDate=new Date();let fetchTimeout=null;
+if(Notification.permission!=="granted") Notification.requestPermission();
+function sendNotification(body){if(Notification.permission==="granted")new Notification(body);}
+function truncateName(name,maxLength=15){return name.length>maxLength?name.slice(0,maxLength-1)+"…":name;}
+function formatLocalTime(utcSeconds){return new Date(utcSeconds*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',hour12:false});}
+function formatDate(d){return d.toISOString().split("T")[0];}
+document.getElementById('currentDate').innerText=formatDate(selectedDate);
+
+// --- Date Navigation ---
+document.getElementById('prevDay').addEventListener('click',()=>{selectedDate.setDate(selectedDate.getDate()-1);updateDate();});
+document.getElementById('nextDay').addEventListener('click',()=>{selectedDate.setDate(selectedDate.getDate()+1);updateDate();});
+document.getElementById('todayBtn').addEventListener('click',()=>{selectedDate=new Date();updateDate();});
+function updateDate(){document.getElementById('currentDate').innerText=formatDate(selectedDate);fetchMatches();}
+
+// --- Settings toggle ---
+document.getElementById('settingsBtn').addEventListener('click',()=>{toggleSettings();});
+function toggleSettings(forceState){
+  settingsVisible=forceState!==undefined?forceState:!settingsVisible;
+  document.getElementById('settingsView').style.display=settingsVisible?'block':'none';
+  document.getElementById('homeView').style.display=settingsVisible?'none':'block';
+}
+
+// --- Fetch Leagues ---
+async function fetchLeagues(){
+  const leagueMap={};
+  for(const country of COUNTRIES){
+    try{
+      const res=await fetch(`https://api.sofascore.com/api/v1/config/unique-tournaments/${country}/football`);
+      const data=await res.json();
+      (data.uniqueTournaments||[]).forEach(t=>{
+        if(!leagueMap[t.id]){
+          leagueMap[t.id]={id:t.id,name:t.name,region:t.category?.name||"Other"};
+        }
+      });
+    }catch(err){console.error(err);}
+  }
+  allLeagues=Object.values(leagueMap);renderLeagueSettings();
+}
+
+// --- Render Settings Grid ---
+function renderLeagueSettings(){
+  const container=document.getElementById('leagueList');container.innerHTML="";
+  const grouped={};
+  allLeagues.forEach(l=>{if(!grouped[l.region])grouped[l.region]=[];grouped[l.region].push(l);});
+  for(const region in grouped){
+    const card=document.createElement('div');card.className="region-card";
+    const regionId=`region_${region.replace(/\s+/g,'_')}`;
+    card.innerHTML=`<h3>${region}<input type="checkbox" id="${regionId}" /></h3>`;
+    grouped[region].forEach(l=>{
+      const div=document.createElement('div');div.className="league-item";
+      div.innerHTML=`<input type="checkbox" id="league_${l.id}" value="${l.id}" ${selectedLeagueIds.includes(l.id)?'checked':''}><label for="league_${l.id}">${l.name}</label>`;
+      card.appendChild(div);
+    });
+    container.appendChild(card);
+    const regionCheckbox=document.getElementById(regionId);
+    const leagueCheckboxes=[...card.querySelectorAll('.league-item input')];
+    regionCheckbox.checked=leagueCheckboxes.every(cb=>cb.checked);
+    regionCheckbox.addEventListener('change',()=>{leagueCheckboxes.forEach(cb=>cb.checked=regionCheckbox.checked);});
+    leagueCheckboxes.forEach(cb=>cb.addEventListener('change',()=>{regionCheckbox.checked=leagueCheckboxes.every(c=>c.checked);}));
+  }
+}
+
+document.getElementById('saveLeaguesBtn').addEventListener('click',()=>{
+  selectedLeagueIds=[];allLeagues.forEach(l=>{const cb=document.getElementById(`league_${l.id}`);if(cb&&cb.checked)selectedLeagueIds.push(l.id);});
+  localStorage.setItem('selectedLeagues',JSON.stringify(selectedLeagueIds));
+  toggleSettings(false);fetchMatches();
+});
+document.getElementById('resetLeaguesBtn').addEventListener('click',()=>{
+  selectedLeagueIds=[];localStorage.removeItem('selectedLeagues');renderLeagueSettings();
+});
+
+// --- Goal Notification Fetch (NO RETRY) ---
+async function fetchGoalDetails(matchId,home,away,homeScore,awayScore,scoringSide){
+  try{
+    const res=await fetch(`https://www.sofascore.com/api/v1/event/${matchId}/incidents`);
+    const data=await res.json();
+    const goals=(data.incidents||[]).filter(inc=>inc.incidentType==="goal" && inc.homeScore===homeScore && inc.awayScore===awayScore && !notifiedGoals.has(inc.id));
+    if(goals.length===0)return;
+    const lastGoal=goals[goals.length-1];notifiedGoals.add(lastGoal.id);
+    let minute="";if(lastGoal.time!==undefined){minute=lastGoal.time+"' ";if(lastGoal.addedTime)minute=lastGoal.time+"+"+lastGoal.addedTime+"' ";}
+    const player=lastGoal.player?.shortName||lastGoal.playerName||"";
+    const assist=lastGoal.assist1?.shortName||lastGoal.assist1Name||"";
+    const typeTag=lastGoal.incidentClass==="penalty"?"(P)":(lastGoal.incidentClass==="ownGoal"?"(OG)":"");
+    let details=minute;
+    if(player && assist) details+=` ${player} (${assist}) ${typeTag}`.trim();
+    else if(player) details+=` ${player} ${typeTag}`.trim();
+    else details+=` ${typeTag}`.trim();
+    const scoreStr=scoringSide==="home"?`${home} [${homeScore}] - ${awayScore} ${away}`:`${home} ${homeScore} - [${awayScore}] ${away}`;
+    sendNotification(`Goal! ${details}\n${scoreStr}`);
+  }catch(err){console.error(err);}
+}
+
+// --- Fetch Matches ---
+const LIVE_URL="https://www.sofascore.com/api/v1/sport/football/events/live";
+async function fetchMatches(){
+  if(fetchTimeout)clearTimeout(fetchTimeout);
+  try{
+    const dateStr=formatDate(selectedDate);
+    const SCHEDULED_URL=`https://www.sofascore.com/api/v1/sport/football/scheduled-events/${dateStr}`;
+    const schedRes=await fetch(SCHEDULED_URL);const schedData=await schedRes.json();
+    let schedEvents=(schedData.events||[]);
+
+    // ✅ STRICT DATE FILTER — ONLY FOR SCHEDULED GAMES
+    schedEvents=schedEvents.filter(ev=>{
+      const eventDate=new Date(ev.startTimestamp*1000).toISOString().split("T")[0];
+      return eventDate===dateStr;
+    });
+
+    const liveRes=await fetch(LIVE_URL);const liveData=await liveRes.json();
+    const liveEvents=liveData.events||[];
+
+    // ✅ Merge scheduled + live matches + REMOVE DUPLICATES
+    const allEventsMap=new Map();
+    [...schedEvents,...liveEvents].forEach(ev=>allEventsMap.set(ev.id,ev));
+    let allEvents=Array.from(allEventsMap.values());
+
+    // Filter leagues if needed
+    let filtered=selectedLeagueIds.length>0?allEvents.filter(ev=>selectedLeagueIds.includes(ev.tournament?.uniqueTournament?.id)):allEvents;
+
+    const notstarted=filtered.filter(m=>m.status.type==="notstarted").sort((a,b)=>(a.startTimestamp||0)-(b.startTimestamp||0));
+    const finished=filtered.filter(m=>m.status.type==="finished");
+    const inprogress=filtered.filter(m=>m.status.type==="inprogress");
+    const columns={notstarted,inprogress,finished};
+
+    for(const col in columns){
+      const container=document.querySelector(`#${col} .matches`);container.innerHTML="";
+      columns[col].forEach(match=>{
+        let home=truncateName(match.homeTeam.shortName||match.homeTeam.name||"Unknown");
+        let away=truncateName(match.awayTeam.shortName||match.awayTeam.name||"Unknown");
+        const homeScore=match.homeScore?.current??0;const awayScore=match.awayScore?.current??0;
+        const description=match.status.description||"";
+        const scoreDisplay=col==="notstarted"?formatLocalTime(match.startTimestamp):`${homeScore} - ${awayScore}`;
+        let minute="";
+        if(col==="inprogress" && match.time?.currentPeriodStartTimestamp){
+          if(description==="Halftime") minute="HT";
+          else{
+            const start=match.time.currentPeriodStartTimestamp;
+            minute=Math.floor((Date.now()/1000-start)/60);
+            if(description.includes("2nd"))minute+=45;
+            minute+="'";
+          }
+        }
+        const card=document.createElement("div");card.className="match-card";
+        card.innerHTML=`<div class="team">${home}</div><div class="score">${scoreDisplay}</div><div class="team">${away}</div>${col==="inprogress"?`<div class="minute">${minute}</div>`:""}`;
+        container.appendChild(card);
+        const prev=previousMatches[match.id]||{};
+        if(prev.description && prev.description!==description){
+          if(prev.description==="Not started" && description==="1st half")sendNotification(`Kick-off \n${home} vs ${away}`);
+          else if(prev.description==="1st half" && description==="Halftime")sendNotification(`Half-time \n${home} ${homeScore} - ${awayScore} ${away}`);
+          else if(prev.description==="Halftime" && description==="2nd half")sendNotification(`2nd half \n${home} ${homeScore} - ${awayScore} ${away}`);
+          else if(prev.description.includes("2nd half") && description==="Ended")sendNotification(`Full Time \n${home} ${homeScore} - ${awayScore} ${away}`);
+        }
+        if(col==="inprogress" && prev.home!==undefined && (homeScore>prev.home||awayScore>prev.away)){
+          const scoringSide=homeScore>prev.home?"home":"away";
+          fetchGoalDetails(match.id,home,away,homeScore,awayScore,scoringSide);
+        }
+        previousMatches[match.id]={home:homeScore,away:awayScore,description};
+      });
+    }
+  }catch(err){console.error(err);}
+  fetchTimeout=setTimeout(fetchMatches,7000+Math.random()*3000);
+}
+
+// --- Init ---
+fetchLeagues().then(()=>fetchMatches());
+</script>
+</body>
+</html>
